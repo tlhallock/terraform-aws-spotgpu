@@ -4,3 +4,4 @@
 *.plan
 .terraform/
 *.pem
+.terraform.lock.hcl

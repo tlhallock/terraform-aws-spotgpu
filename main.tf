@@ -16,12 +16,40 @@ locals {
   avail_zone = "${var.avail_zone}"
 }
 
+
+#data "aws_ami" "al2" {
+#  most_recent = true
+
+#  filter {
+#    name   = "name"
+#    values = ["amzn2-ami-hvm-*-x86_64-ebs"]
+#  }
+
+#  owners = ["amazon"]
+#}
+
+resource "tls_private_key" "key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "generated_key" {
+  key_name   = "key-${uuid()}"
+  public_key = "${tls_private_key.key.public_key_openssh}"
+}
+
+resource "local_file" "pem" {
+  filename        = "${aws_key_pair.generated_key.key_name}.pem"
+  content         = "${tls_private_key.key.private_key_pem}"
+  file_permission = "400"
+}
+
 resource "aws_vpc" "main_vpc" {
     cidr_block = "${var.my_cidr_block}"
     instance_tenancy = "default"
     enable_dns_hostnames = true
 
-    tags {
+    tags = {
         Name = "main_vpc"
     }
 }
@@ -29,7 +57,7 @@ resource "aws_vpc" "main_vpc" {
 resource "aws_internet_gateway" "main_vpc_igw" {
     vpc_id = "${aws_vpc.main_vpc.id}"
 
-    tags {
+    tags = {
         Name = "main_vpc_igw"
     }
 }
@@ -42,7 +70,7 @@ resource "aws_default_route_table" "main_vpc_default_route_table" {
         gateway_id = "${aws_internet_gateway.main_vpc_igw.id}"
     }
 
-    tags {
+    tags = {
         Name = "main_vpc_default_route_table"
     }
 }
@@ -52,7 +80,8 @@ resource "aws_subnet" "main_vpc_subnet" {
     cidr_block = "${var.my_cidr_block}"
     map_public_ip_on_launch = true
     availability_zone  = "${local.avail_zone}"
-    tags {
+
+    tags = {
         Name = "main_vpc_subnet"
     }
 }
@@ -80,63 +109,100 @@ resource "aws_default_network_acl" "main_vpc_nacl" {
         to_port    = 0
     }
 
-    tags {
+    tags = {
         Name = "main_vpc_nacl"
     }
 }
 
 resource "aws_default_security_group" "main_vpc_security_group" {
-    vpc_id = "${aws_vpc.main_vpc.id}"
+    vpc_id = aws_vpc.main_vpc.id
 
-    # SSH access from anywhere
-    ingress {
-      from_port = 22
-      to_port = 22
-      protocol = "tcp"
-      cidr_blocks = [
-        "0.0.0.0/0"]
-    }
-
-    # for Jupyter notebook
-    ingress {
-      from_port = 8888
-      to_port = 8888
-      protocol = "tcp"
-      cidr_blocks = [
-        "0.0.0.0/0"]
-    }
-
-    # for git clone
-    egress {
-      from_port = 0
-      to_port = 0
-      protocol = "-1"
-      cidr_blocks = [
-        "0.0.0.0/0"]
-    }
-
-    tags {
+    tags = {
         Name = "main_vpc_security_group"
     }
 }
 
-resource "aws_spot_instance_request" "aws_dl_custom_spot" {
+# SSH access from anywhere
+resource "aws_security_group_rule" "ssh_access" {
+    type        = "ingress"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    security_group_id = aws_default_security_group.main_vpc_security_group.id
+}
+
+# for Jupyter notebook
+resource "aws_security_group_rule" "jupyter_access" {
+    type        = "ingress"
+    from_port   = 8888
+    to_port     = 8888
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    security_group_id = aws_default_security_group.main_vpc_security_group.id
+}
+
+# for git clone
+resource "aws_security_group_rule" "git_clone" {
+    type        = "egress"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    security_group_id = aws_default_security_group.main_vpc_security_group.id
+}
+
+# resource "aws_spot_instance_request" "aws_dl_custom_spot" {
+resource "aws_instance" "aws_dl_custom_spot" {
     ami                         = "${var.ami_id}"
-    spot_price                  = "${var.spot_price}"
+#    spot_price                  = "${var.spot_price}"
     instance_type               = "${var.instance_type}"
-    key_name                    = "${var.my_key_pair_name}"
+  user_data              = "${file("script.sh")}"
+    key_name               = "${aws_key_pair.generated_key.key_name}"
     monitoring                  = true
     associate_public_ip_address = true
-    count                       = "${var.num_instances}"
-    security_groups             =
-["${aws_default_security_group.main_vpc_security_group.id}"]
+    security_groups             = ["${aws_default_security_group.main_vpc_security_group.id}"]
     subnet_id                   = "${aws_subnet.main_vpc_subnet.id}"
-    ebs_block_device            = [ {
-                                    device_name = "/dev/sdh"
-                                    volume_size = "${var.ebs_volume_size}"
-                                    volume_type = "gp2"
-                                    } ]
-    tags {
+    tags = {
         Name = "aws_dl_custom_spot"
     }
+}
+
+########################################################
+# OLD:
+#resource "aws_instance" "aws_dl_custom_spot" {
+#    ami                         = "${var.ami_id}"
+#  availability_zone      = "${var.availability_zone}"
+#  instance_type          = "${var.instance_type}"
+#  key_name               = "${aws_key_pair.generated_key.key_name}"
+#  vpc_security_group_ids = ["${aws_security_group.jupyter.id}"]
+#  user_data              = "${file("script.sh")}"
+#}
+########################################################
+
+
+
+
+
+
+resource "aws_ebs_volume" "jupyter" {
+  availability_zone = "${var.avail_zone}"
+  size              = "${var.ebs_volume_size}"
+  type              = "gp2"
+
+#  tags = {
+#    Name        = "${title(var.service)}-${timestamp()}_Anaconda3"
+#    Service     = "${var.service}"
+#    Contact     = "${var.contact}"
+#    Environment = "${title(lower(var.environment))}"
+#    Terraform   = "true"
+#  }
+}
+
+resource "aws_volume_attachment" "jupyter" {
+  device_name  = "/dev/sdh"
+#  instance_id  = "${aws_spot_instance_request.aws_dl_custom_spot.id}"
+  instance_id  = "${aws_instance.aws_dl_custom_spot.id}"
+  volume_id    = "${aws_ebs_volume.jupyter.id}"
+  force_detach = true
 }
